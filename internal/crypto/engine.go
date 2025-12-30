@@ -15,13 +15,11 @@ const (
 	keyLen   = 32 // AES-256
 )
 
-// CryptoSession хранит производный ключ в памяти
 type CryptoSession struct {
 	key []byte
 }
 
 func deriveKey(password string, salt []byte) []byte {
-	// Параметры Argon2id для высокой стойкости
 	return argon2.IDKey([]byte(password), salt, 3, 64*1024, 4, keyLen)
 }
 
@@ -30,14 +28,7 @@ func NewSession(password string, salt []byte) *CryptoSession {
 }
 
 func (s *CryptoSession) Encrypt(plaintext []byte) ([]byte, error) {
-	salt := make([]byte, saltSize)
-	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return nil, err
-	}
-
-	// Пересоздаем сессионный ключ с солью для конкретной записи
-	key := deriveKey(string(s.key), salt) // В реальном приложении лучше передать исходный пароль
-	block, err := aes.NewCipher(key)
+	block, err := aes.NewCipher(s.key)
 	if err != nil {
 		return nil, err
 	}
@@ -52,19 +43,17 @@ func (s *CryptoSession) Encrypt(plaintext []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
-	return append(salt, ciphertext...), nil
+	// Возвращаем Nonce + Ciphertext. Соль добавим в app.go при сохранении.
+	return gcm.Seal(nonce, nonce, plaintext, nil), nil
 }
 
 func Decrypt(data []byte, password string) ([]byte, error) {
 	if len(data) < saltSize+12 {
-		return nil, errors.New("data too short")
+		return nil, errors.New("данные слишком короткие")
 	}
 
 	salt := data[:saltSize]
-	nonceSize := 12
-	nonce := data[saltSize : saltSize+nonceSize]
-	ciphertext := data[saltSize+nonceSize:]
+	payload := data[saltSize:]
 
 	key := deriveKey(password, salt)
 	block, err := aes.NewCipher(key)
@@ -77,5 +66,11 @@ func Decrypt(data []byte, password string) ([]byte, error) {
 		return nil, err
 	}
 
+	nonceSize := gcm.NonceSize()
+	if len(payload) < nonceSize {
+		return nil, errors.New("неверный формат данных")
+	}
+
+	nonce, ciphertext := payload[:nonceSize], payload[nonceSize:]
 	return gcm.Open(nil, nonce, ciphertext, nil)
 }

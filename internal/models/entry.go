@@ -1,11 +1,9 @@
 package models
 
 type Entry struct {
-	Service  string `json:"s"`
-	Login    string `json:"l"`
-	Password string `json:"p"`
-}
-
-type Vault struct {
-	Entries []Entry
+	Service   string `json:"service"`
+	Login     string `json:"login"`
+	Password  string `json:"password"`
+	Group     string `json:"group"`      // Название группы
+	IsDeleted bool   `json:"is_deleted"` // Флаг корзины
 }

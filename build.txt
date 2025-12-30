@@ -2,4 +2,4 @@ go build -o manager.exe ./cmd/manager/main.go
 
 go build -ldflags="-s -w -X main.version=1.0.0 -extldflags '-static'" -trimpath -o manager.exe ./cmd/manager/main.go
 
-go build -ldflags="-s -w -X main.version=1.0.0 -H=windowsgui -extldflags '-static'" -trimpath -o manager.exe ./cmd/manager/main.go
+go build -ldflags="-s -w -X main.version=0.0.1 -H=windowsgui -extldflags '-static'" -trimpath -o manager.exe ./cmd/manager/main.go
