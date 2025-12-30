@@ -21,16 +21,17 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
+// AppContext хранит состояние приложения в рамках одной сессии
 type AppContext struct {
 	Window         fyne.Window
 	Entries        []models.Entry
 	MasterPassword string
 	Session        *crypto.CryptoSession
-	CurrentSalt    []byte // Соль текущей открытой базы
+	CurrentSalt    []byte // Соль текущей открытой базы (16 байт)
 	List           *widget.List
 }
 
-// RightClickContainer корректно реализует перехват событий мыши без блокировки вложенных элементов
+// RightClickContainer — виджет-обертка для обработки правой кнопки мыши
 type RightClickContainer struct {
 	widget.BaseWidget
 	content      fyne.CanvasObject
@@ -47,7 +48,6 @@ func NewRightClickContainer(content fyne.CanvasObject, callback func(*desktop.Mo
 }
 
 func (c *RightClickContainer) CreateRenderer() fyne.WidgetRenderer {
-	// Используем простой рендерер, который отображает вложенный список
 	return widget.NewSimpleRenderer(c.content)
 }
 
@@ -57,11 +57,13 @@ func (c *RightClickContainer) MouseDown(ev *desktop.MouseEvent) {
 	}
 }
 
+// Пустые методы для реализации интерфейса Mouseable
 func (c *RightClickContainer) MouseUp(*desktop.MouseEvent)   {}
 func (c *RightClickContainer) MouseMoved(*desktop.MouseEvent) {}
 func (c *RightClickContainer) MouseIn(*desktop.MouseEvent)    {}
 func (c *RightClickContainer) MouseOut()                      {}
 
+// GenerateSecurePassword создает случайный пароль заданной длины
 func GenerateSecurePassword(length int, useSpecial bool) string {
 	chars := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	if useSpecial {
@@ -75,6 +77,7 @@ func GenerateSecurePassword(length int, useSpecial bool) string {
 	return string(res)
 }
 
+// sortEntries сортирует записи по группе и названию сервиса
 func sortEntries(entries []models.Entry) {
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Group != entries[j].Group {
@@ -84,14 +87,16 @@ func sortEntries(entries []models.Entry) {
 	})
 }
 
+// StartUI инициализирует основной интерфейс приложения
 func StartUI(w fyne.Window) {
 	ctx := &AppContext{Window: w}
 	passInput := widget.NewPasswordEntry()
-	passInput.SetPlaceHolder("Мастер-пароль")
+	passInput.SetPlaceHolder("Введите мастер-пароль")
 
 	var authBox *fyne.Container
 	var mainView *fyne.Container
 
+	// Инициализация списка записей
 	ctx.List = widget.NewList(
 		func() int {
 			count := 0
@@ -103,7 +108,11 @@ func StartUI(w fyne.Window) {
 			return count
 		},
 		func() fyne.CanvasObject {
-			return container.NewHBox(widget.NewLabel("Группа"), widget.NewSeparator(), widget.NewLabel("Сервис"))
+			return container.NewHBox(
+				widget.NewLabel("Группа"),
+				widget.NewSeparator(),
+				widget.NewLabel("Сервис"),
+			)
 		},
 		func(id widget.ListItemID, o fyne.CanvasObject) {
 			activeIdx := 0
@@ -144,12 +153,13 @@ func StartUI(w fyne.Window) {
 	topButtons := container.NewHBox(addBtn, trashBtn)
 	topButtons.Hide()
 
+	// Кнопка разблокировки базы
 	unlockBtn := widget.NewButton("Разблокировать", func() {
 		ctx.MasterPassword = passInput.Text
 		data, err := storage.Load()
 
 		if err != nil {
-			dialog.ShowConfirm("База не найдена", "Файл vault.bin не существует.\nСоздать новую базу данных?", func(create bool) {
+			dialog.ShowConfirm("База не найдена", "Файл vault.bin не найден. Создать новую базу?", func(create bool) {
 				if create {
 					ctx.CurrentSalt = make([]byte, 16)
 					_, _ = io.ReadFull(rand.Reader, ctx.CurrentSalt)
@@ -166,25 +176,26 @@ func StartUI(w fyne.Window) {
 			return
 		}
 
-		if len(data) < 16+12 {
-			dialog.ShowError(fmt.Errorf("Файл повреждён или пуст"), w)
+		if len(data) < 16 {
+			dialog.ShowError(fmt.Errorf("Файл базы слишком мал или поврежден"), w)
 			return
 		}
 
-		// ВАЖНО: сначала фиксируем соль из файла
+		// Сначала берем соль из файла
 		ctx.CurrentSalt = data[:16]
-		
+
+		// Пытаемся расшифровать
 		decrypted, err := crypto.Decrypt(data, ctx.MasterPassword)
 		if err != nil {
 			dialog.ShowError(fmt.Errorf("Неверный мастер-пароль"), w)
 			return
 		}
 
-		// Если дешифровка успешна, сохраняем сессию
+		// Если успешно, создаем сессию для шифрования при будущих сохранениях
 		ctx.Session = crypto.NewSession(ctx.MasterPassword, ctx.CurrentSalt)
 
 		if err := json.Unmarshal(decrypted, &ctx.Entries); err != nil {
-			dialog.ShowError(fmt.Errorf("Повреждённые данные"), w)
+			dialog.ShowError(fmt.Errorf("Ошибка разбора JSON: %v", err), w)
 			return
 		}
 
@@ -195,12 +206,18 @@ func StartUI(w fyne.Window) {
 		ctx.List.Refresh()
 	})
 
-	authBox = container.NewVBox(widget.NewLabel("Мастер-пароль:"), passInput, unlockBtn)
+	authBox = container.NewVBox(
+		widget.NewLabel("Вход в систему"),
+		passInput,
+		unlockBtn,
+	)
 
-	// Обертка для правой кнопки
+	// Обертка списка для обработки клика правой кнопкой
 	wrappedList := NewRightClickContainer(ctx.List, func(ev *desktop.MouseEvent) {
-		menu := fyne.NewMenu("Меню",
-			fyne.NewMenuItem("Добавить запись", func() { showAddDialog(ctx) }),
+		menu := fyne.NewMenu("Действия",
+			fyne.NewMenuItem("Добавить запись", func() {
+				showAddDialog(ctx)
+			}),
 		)
 		widget.ShowPopUpMenuAtPosition(menu, w.Canvas(), ev.AbsolutePosition)
 	})
@@ -208,9 +225,14 @@ func StartUI(w fyne.Window) {
 	mainView = container.NewBorder(topButtons, nil, nil, nil, wrappedList)
 	mainView.Hide()
 
-	w.SetContent(container.NewStack(canvas.NewRectangle(color.Transparent), authBox, mainView))
+	w.SetContent(container.NewStack(
+		canvas.NewRectangle(color.Transparent),
+		container.NewCenter(authBox),
+		mainView,
+	))
 }
 
+// saveState сохраняет текущее состояние записей в файл
 func saveState(ctx *AppContext) {
 	if ctx.Session == nil || ctx.CurrentSalt == nil {
 		return
@@ -223,59 +245,66 @@ func saveState(ctx *AppContext) {
 		return
 	}
 
+	// Шифруем данные (используя ту же соль и пароль из сессии)
 	encrypted, err := ctx.Session.Encrypt(jsonData)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "Ошибка шифрования: %v\n", err)
 		return
 	}
 
-	// Всегда используем CurrentSalt, чтобы не менять ключ AES в рамках одной сессии
-	final := append(ctx.CurrentSalt, encrypted...)
-	err = storage.Save(final)
+	// Склеиваем: Соль + Зашифрованные данные
+	finalData := append(ctx.CurrentSalt, encrypted...)
+	
+	err = storage.Save(finalData)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Ошибка сохранения: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Ошибка записи: %v\n", err)
 	}
 
 	ctx.List.Refresh()
 }
 
+// showAddDialog показывает окно создания новой записи
 func showAddDialog(ctx *AppContext) {
-	g := widget.NewEntry()
-	g.SetPlaceHolder("Группа")
-	s := widget.NewEntry()
-	l := widget.NewEntry()
-	p := widget.NewEntry()
+	groupEntry := widget.NewEntry()
+	groupEntry.SetPlaceHolder("Напр: Работа, Игры")
+	serviceEntry := widget.NewEntry()
+	loginEntry := widget.NewEntry()
+	passwordEntry := widget.NewEntry()
 
-	lenSlider := widget.NewSlider(8, 32)
-	lenSlider.SetValue(16)
+	lengthSlider := widget.NewSlider(8, 64)
+	lengthSlider.SetValue(16)
 
 	form := container.NewVBox(
-		widget.NewLabel("Группа:"), g,
-		widget.NewLabel("Сервис:"), s,
-		widget.NewLabel("Логин:"), l,
-		widget.NewLabel("Пароль:"), p,
-		widget.NewButton("Генерировать", func() {
-			p.SetText(GenerateSecurePassword(int(lenSlider.Value), true))
+		widget.NewLabel("Группа:"), groupEntry,
+		widget.NewLabel("Сервис/Сайт:"), serviceEntry,
+		widget.NewLabel("Логин:"), loginEntry,
+		widget.NewLabel("Пароль:"), passwordEntry,
+		widget.NewButton("Сгенерировать", func() {
+			passwordEntry.SetText(GenerateSecurePassword(int(lengthSlider.Value), true))
 		}),
-		widget.NewLabel("Длина пароля:"), lenSlider,
+		widget.NewLabel("Длина пароля:"), lengthSlider,
 	)
 
-	dialog.ShowCustomConfirm("Новая запись", "Сохранить", "Отмена", form, func(b bool) {
-		if b {
-			ctx.Entries = append(ctx.Entries, models.Entry{
-				Group:    g.Text,
-				Service:  s.Text,
-				Login:    l.Text,
-				Password: p.Text,
-			})
+	dialog.ShowCustomConfirm("Добавить запись", "Сохранить", "Отмена", form, func(ok bool) {
+		if ok {
+			newEntry := models.Entry{
+				Group:    groupEntry.Text,
+				Service:  serviceEntry.Text,
+				Login:    loginEntry.Text,
+				Password: passwordEntry.Text,
+			}
+			ctx.Entries = append(ctx.Entries, newEntry)
 			saveState(ctx)
 		}
 	}, ctx.Window)
 }
 
-func showDetailDialog(ctx *AppContext, realID int) {
-	entry := ctx.Entries[realID]
+// showDetailDialog показывает детали записи и позволяет копировать пароль
+func showDetailDialog(ctx *AppContext, realIndex int) {
+	entry := ctx.Entries[realIndex]
+	
 	passLabel := widget.NewLabel("********")
-
+	
 	content := container.NewVBox(
 		widget.NewLabel("Сервис: "+entry.Service),
 		widget.NewLabel("Логин: "+entry.Login),
@@ -290,67 +319,72 @@ func showDetailDialog(ctx *AppContext, realID int) {
 			}),
 		),
 		widget.NewButton("Копировать пароль", func() {
-			fyne.CurrentApp().Clipboard().SetContent(entry.Password)
+			ctx.Window.Clipboard().SetContent(entry.Password)
 		}),
 		widget.NewSeparator(),
-		widget.NewButton("Удалить", func() {
-			ctx.Entries[realID].IsDeleted = true
+		widget.NewButton("Переместить в корзину", func() {
+			ctx.Entries[realIndex].IsDeleted = true
 			saveState(ctx)
 		}),
 	)
 
-	dialog.ShowCustom("Детали", "Закрыть", content, ctx.Window)
+	dialog.ShowCustom("Детали записи", "Закрыть", content, ctx.Window)
 }
 
+// showTrashDialog показывает удаленные записи
 func showTrashDialog(ctx *AppContext) {
-	getDeleted := func() []int {
-		var ids []int
+	getDeletedIndices := func() []int {
+		var list []int
 		for i, e := range ctx.Entries {
 			if e.IsDeleted {
-				ids = append(ids, i)
+				list = append(list, i)
 			}
 		}
-		return ids
+		return list
 	}
 
-	deletedIDs := getDeleted()
+	indices := getDeletedIndices()
 
 	list := widget.NewList(
-		func() int { return len(deletedIDs) },
+		func() int { return len(indices) },
 		func() fyne.CanvasObject { return widget.NewLabel("") },
 		func(id widget.ListItemID, o fyne.CanvasObject) {
-			o.(*widget.Label).SetText(ctx.Entries[deletedIDs[id]].Service)
+			o.(*widget.Label).SetText(ctx.Entries[indices[id]].Service)
 		},
 	)
 
 	list.OnSelected = func(id widget.ListItemID) {
-		realIdx := deletedIDs[id]
-		dialog.ShowConfirm("Восстановить?", "Вернуть запись "+ctx.Entries[realIdx].Service+"?", func(b bool) {
-			if b {
+		realIdx := indices[id]
+		dialog.ShowConfirm("Восстановить?", "Вернуть запись "+ctx.Entries[realIdx].Service+"?", func(yes bool) {
+			if yes {
 				ctx.Entries[realIdx].IsDeleted = false
 				saveState(ctx)
-				deletedIDs = getDeleted()
+				indices = getDeletedIndices()
 				list.Refresh()
 			}
 		}, ctx.Window)
 		list.Unselect(id)
 	}
 
-	clearBtn := widget.NewButton("Очистить навсегда", func() {
-		var active []models.Entry
-		for _, e := range ctx.Entries {
-			if !e.IsDeleted {
-				active = append(active, e)
+	clearAllBtn := widget.NewButton("Очистить корзину навсегда", func() {
+		dialog.ShowConfirm("Удаление", "Это действие нельзя отменить. Продолжить?", func(confirm bool) {
+			if confirm {
+				var remaining []models.Entry
+				for _, e := range ctx.Entries {
+					if !e.IsDeleted {
+						remaining = append(remaining, e)
+					}
+				}
+				ctx.Entries = remaining
+				saveState(ctx)
+				indices = getDeletedIndices()
+				list.Refresh()
 			}
-		}
-		ctx.Entries = active
-		saveState(ctx)
-		deletedIDs = getDeleted()
-		list.Refresh()
+		}, ctx.Window)
 	})
 
-	content := container.NewBorder(nil, clearBtn, nil, nil, list)
-	d := dialog.NewCustom("Корзина", "Закрыть", content, ctx.Window)
+	content := container.NewBorder(nil, clearAllBtn, nil, nil, list)
+	d := dialog.NewCustom("Корзина (нажмите для восстановления)", "Закрыть", content, ctx.Window)
 	d.Resize(fyne.NewSize(400, 400))
 	d.Show()
 }
