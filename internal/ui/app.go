@@ -26,40 +26,41 @@ type AppContext struct {
 	Entries        []models.Entry
 	MasterPassword string
 	Session        *crypto.CryptoSession
+	CurrentSalt    []byte // Соль текущей открытой базы
 	List           *widget.List
 }
 
-// RightClickOverlay — прозрачный слой поверх списка, ловит правую кнопку
-type RightClickOverlay struct {
+// RightClickContainer корректно реализует перехват событий мыши без блокировки вложенных элементов
+type RightClickContainer struct {
 	widget.BaseWidget
-	OnRight func(*desktop.MouseEvent)
+	content      fyne.CanvasObject
+	OnRightClick func(*desktop.MouseEvent)
 }
 
-func NewRightClickOverlay(onRight func(*desktop.MouseEvent)) *RightClickOverlay {
-	r := &RightClickOverlay{OnRight: onRight}
-	r.ExtendBaseWidget(r)
-	return r
+func NewRightClickContainer(content fyne.CanvasObject, callback func(*desktop.MouseEvent)) *RightClickContainer {
+	res := &RightClickContainer{
+		content:      content,
+		OnRightClick: callback,
+	}
+	res.ExtendBaseWidget(res)
+	return res
 }
 
-func (r *RightClickOverlay) CreateRenderer() fyne.WidgetRenderer {
-	rect := canvas.NewRectangle(color.Transparent)
-	return widget.NewSimpleRenderer(rect)
+func (c *RightClickContainer) CreateRenderer() fyne.WidgetRenderer {
+	// Используем простой рендерер, который отображает вложенный список
+	return widget.NewSimpleRenderer(c.content)
 }
 
-func (r *RightClickOverlay) MinSize() fyne.Size {
-	return fyne.NewSize(0, 0) // не занимает место
-}
-
-func (r *RightClickOverlay) MouseDown(ev *desktop.MouseEvent) {
-	if ev.Button == desktop.MouseButtonSecondary && r.OnRight != nil {
-		r.OnRight(ev)
+func (c *RightClickContainer) MouseDown(ev *desktop.MouseEvent) {
+	if ev.Button == desktop.MouseButtonSecondary && c.OnRightClick != nil {
+		c.OnRightClick(ev)
 	}
 }
 
-func (r *RightClickOverlay) MouseUp(*desktop.MouseEvent)   {}
-func (r *RightClickOverlay) MouseMoved(*desktop.MouseEvent) {}
-func (r *RightClickOverlay) MouseIn(*desktop.MouseEvent)    {}
-func (r *RightClickOverlay) MouseOut()                      {}
+func (c *RightClickContainer) MouseUp(*desktop.MouseEvent)   {}
+func (c *RightClickContainer) MouseMoved(*desktop.MouseEvent) {}
+func (c *RightClickContainer) MouseIn(*desktop.MouseEvent)    {}
+func (c *RightClickContainer) MouseOut()                      {}
 
 func GenerateSecurePassword(length int, useSpecial bool) string {
 	chars := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -144,89 +145,78 @@ func StartUI(w fyne.Window) {
 	topButtons.Hide()
 
 	unlockBtn := widget.NewButton("Разблокировать", func() {
-    ctx.MasterPassword = passInput.Text
-    data, err := storage.Load()
-    
-    if err != nil {
-        // Файл не найден или другая ошибка чтения → предлагаем создать новую
-        dialog.ShowConfirm("База не найдена", "Файл vault.bin не существует.\nСоздать новую базу данных?", func(create bool) {
-            if create {
-                salt := make([]byte, 16)
-                io.ReadFull(rand.Reader, salt) // игнорируем ошибку, крайне маловероятна
-                ctx.Session = crypto.NewSession(ctx.MasterPassword, salt)
-                ctx.Entries = []models.Entry{}
-                saveState(ctx)  // сохранит новую пустую базу
-                
-                authBox.Hide()
-                topButtons.Show()
-                mainView.Show()
-                ctx.List.Refresh()
-            }
-        }, w)
-        return
-    }
+		ctx.MasterPassword = passInput.Text
+		data, err := storage.Load()
 
-    if len(data) < 16+12 {  // соль + минимум nonce
-        dialog.ShowError(fmt.Errorf("Файл повреждён или пуст"), w)
-        return
-    }
+		if err != nil {
+			dialog.ShowConfirm("База не найдена", "Файл vault.bin не существует.\nСоздать новую базу данных?", func(create bool) {
+				if create {
+					ctx.CurrentSalt = make([]byte, 16)
+					_, _ = io.ReadFull(rand.Reader, ctx.CurrentSalt)
+					ctx.Session = crypto.NewSession(ctx.MasterPassword, ctx.CurrentSalt)
+					ctx.Entries = []models.Entry{}
+					saveState(ctx)
 
-    decrypted, err := crypto.Decrypt(data, ctx.MasterPassword)
-    if err != nil {
-        dialog.ShowError(fmt.Errorf("Неверный мастер-пароль"), w)
-        return
-    }
+					authBox.Hide()
+					topButtons.Show()
+					mainView.Show()
+					ctx.List.Refresh()
+				}
+			}, w)
+			return
+		}
 
-    salt := data[:16]
-    ctx.Session = crypto.NewSession(ctx.MasterPassword, salt)
+		if len(data) < 16+12 {
+			dialog.ShowError(fmt.Errorf("Файл повреждён или пуст"), w)
+			return
+		}
 
-    if err := json.Unmarshal(decrypted, &ctx.Entries); err != nil {
-        dialog.ShowError(fmt.Errorf("Повреждённые данные"), w)
-        return
-    }
+		// ВАЖНО: сначала фиксируем соль из файла
+		ctx.CurrentSalt = data[:16]
+		
+		decrypted, err := crypto.Decrypt(data, ctx.MasterPassword)
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("Неверный мастер-пароль"), w)
+			return
+		}
 
-    sortEntries(ctx.Entries)
-    authBox.Hide()
-    topButtons.Show()
-    mainView.Show()
-    ctx.List.Refresh()
-})
+		// Если дешифровка успешна, сохраняем сессию
+		ctx.Session = crypto.NewSession(ctx.MasterPassword, ctx.CurrentSalt)
+
+		if err := json.Unmarshal(decrypted, &ctx.Entries); err != nil {
+			dialog.ShowError(fmt.Errorf("Повреждённые данные"), w)
+			return
+		}
+
+		sortEntries(ctx.Entries)
+		authBox.Hide()
+		topButtons.Show()
+		mainView.Show()
+		ctx.List.Refresh()
+	})
 
 	authBox = container.NewVBox(widget.NewLabel("Мастер-пароль:"), passInput, unlockBtn)
 
-	// Слой для правой кнопки поверх списка
-	overlay := NewRightClickOverlay(func(ev *desktop.MouseEvent) {
-		menu := fyne.NewMenu("Контекст",
+	// Обертка для правой кнопки
+	wrappedList := NewRightClickContainer(ctx.List, func(ev *desktop.MouseEvent) {
+		menu := fyne.NewMenu("Меню",
 			fyne.NewMenuItem("Добавить запись", func() { showAddDialog(ctx) }),
 		)
 		widget.ShowPopUpMenuAtPosition(menu, w.Canvas(), ev.AbsolutePosition)
 	})
 
-	// Список + overlay сверху (прозрачный)
-	listWithOverlay := container.NewStack(ctx.List, overlay)
-
-	mainView = container.NewBorder(topButtons, nil, nil, nil, listWithOverlay)
+	mainView = container.NewBorder(topButtons, nil, nil, nil, wrappedList)
 	mainView.Hide()
 
 	w.SetContent(container.NewStack(canvas.NewRectangle(color.Transparent), authBox, mainView))
 }
 
 func saveState(ctx *AppContext) {
-	if ctx.Session == nil {
+	if ctx.Session == nil || ctx.CurrentSalt == nil {
 		return
 	}
 
 	sortEntries(ctx.Entries)
-
-	// Всегда берём старую соль, если файл существует
-	oldData, err := storage.Load()
-	var salt []byte
-	if err == nil && len(oldData) >= 16 {
-		salt = oldData[:16]
-	} else {
-		salt = make([]byte, 16)
-		_, _ = io.ReadFull(rand.Reader, salt)
-	}
 
 	jsonData, err := json.Marshal(ctx.Entries)
 	if err != nil {
@@ -238,10 +228,10 @@ func saveState(ctx *AppContext) {
 		return
 	}
 
-	final := append(salt, encrypted...)
+	// Всегда используем CurrentSalt, чтобы не менять ключ AES в рамках одной сессии
+	final := append(ctx.CurrentSalt, encrypted...)
 	err = storage.Save(final)
 	if err != nil {
-		// Можно вывести в консоль или диалог
 		fmt.Fprintf(os.Stderr, "Ошибка сохранения: %v\n", err)
 	}
 
@@ -360,7 +350,7 @@ func showTrashDialog(ctx *AppContext) {
 	})
 
 	content := container.NewBorder(nil, clearBtn, nil, nil, list)
-	d := dialog.NewCustom("Корзина (нажмите для восстановления)", "Закрыть", content, ctx.Window)
+	d := dialog.NewCustom("Корзина", "Закрыть", content, ctx.Window)
 	d.Resize(fyne.NewSize(400, 400))
 	d.Show()
 }
